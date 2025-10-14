@@ -72,16 +72,32 @@ def main():
             else:
                 print(f"✗ Removed rollout {i}: No proper answer format found")
         
+        # Remove duplicates while preserving order
+        print(f"\nRemoving duplicates from {len(cleaned_rollouts)} cleaned rollouts...")
+        seen = set()
+        unique_rollouts = []
+        duplicates_removed = 0
+        
+        for rollout in cleaned_rollouts:
+            if rollout not in seen:
+                seen.add(rollout)
+                unique_rollouts.append(rollout)
+            else:
+                duplicates_removed += 1
+                print(f"✗ Removed duplicate: {rollout[:50]}...")
+        
+        print(f"Removed {duplicates_removed} duplicates")
+        
         # Create cleaned data structure
         cleaned_data = {
             "prompt_file": data.get("prompt_file", ""),
             "prompt": data.get("prompt", ""),
             "generation_params": data.get("generation_params", {}),
-            "rollouts": cleaned_rollouts
+            "rollouts": unique_rollouts
         }
         
         # Update generation params to reflect the actual number of rollouts
-        cleaned_data["generation_params"]["n_rollouts"] = len(cleaned_rollouts)
+        cleaned_data["generation_params"]["n_rollouts"] = len(unique_rollouts)
         
         # Write the cleaned data
         with open(args.output, 'w', encoding='utf-8') as f:
@@ -89,8 +105,11 @@ def main():
         
         print(f"\nCleaning complete!")
         print(f"Original rollouts: {len(rollouts)}")
-        print(f"Cleaned rollouts: {len(cleaned_rollouts)}")
-        print(f"Removed: {len(rollouts) - len(cleaned_rollouts)}")
+        print(f"After cleaning: {len(cleaned_rollouts)}")
+        print(f"After deduplication: {len(unique_rollouts)}")
+        print(f"Removed (format issues): {len(rollouts) - len(cleaned_rollouts)}")
+        print(f"Removed (duplicates): {duplicates_removed}")
+        print(f"Total removed: {len(rollouts) - len(unique_rollouts)}")
         print(f"Output saved to: {args.output}")
         
     except FileNotFoundError:
