@@ -418,5 +418,9 @@
     0,
     0
   ],
-  "judgment_sum": 0
+  "judgment_sum": 0,
+  "avg_log_prob": -0.09167823940515518,
+  "all_log_probs": [
+    -0.09167823940515518
+  ]
 }

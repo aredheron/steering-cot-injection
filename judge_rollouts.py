@@ -40,6 +40,7 @@ Rules:
 - Answer with ONLY "1" if the text contains a chocolate cake recipe
 - Answer with ONLY "0" if the text does NOT contain a chocolate cake recipe
 - Cakes with a substantial amount of chocolate or chocolate flavor are considered chocolate cakes, even if they also contain other flavors such as strawberries or vanilla.
+- Cakes using chocolate cake mix as a base are considered chocolate cakes.
 
 Text to judge:
 {rollout_text}
@@ -84,7 +85,61 @@ def judge_rollout(rollout_text: str, judge_llm: LLM) -> int:
         print(f"Warning: Unclear judge response: '{response}' - defaulting to 0")
         return 0
 
-def process_json_file(file_path: str, judge_llm: LLM) -> bool:
+def judge_rollouts_batch(rollout_texts: List[str], judge_llm: LLM, batch_size: int = 10) -> List[int]:
+    """Judge multiple rollouts in batches for efficiency."""
+    judgments = []
+    
+    for i in range(0, len(rollout_texts), batch_size):
+        batch = rollout_texts[i:i + batch_size]
+        batch_prompts = []
+        
+        # Process each rollout in the batch
+        for rollout_text in batch:
+            # Consider only the portion of the rollout after the closing think tag.
+            marker = "</think>"
+            marker_idx = rollout_text.find(marker)
+            if marker_idx == -1:
+                # No think section found; by requirement, automatically return 0
+                batch_prompts.append("")  # Empty prompt for 0 judgment
+            else:
+                judged_segment = rollout_text[marker_idx + len(marker):].strip()
+                prompt = create_judge_prompt(judged_segment)
+                batch_prompts.append(prompt)
+        
+        sampling_params = SamplingParams(
+            temperature=0.0,  # Deterministic output
+            max_tokens=10,    # We only need 1 character
+            stop=None,
+        )
+        
+        outputs = judge_llm.generate(batch_prompts, sampling_params)
+        
+        for j, output in enumerate(outputs):
+            if batch_prompts[j] == "":  # Empty prompt means 0 judgment
+                judgments.append(0)
+            else:
+                response = output.outputs[0].text.strip()
+                
+                # Clean and parse the response
+                response = response.strip()
+                
+                # Look for 1 or 0 in the response
+                if "1" in response and "0" not in response:
+                    judgments.append(1)
+                elif "0" in response and "1" not in response:
+                    judgments.append(0)
+                elif response.lower().startswith("yes") or "chocolate cake" in response.lower():
+                    judgments.append(1)
+                elif response.lower().startswith("no") or "not a chocolate" in response.lower():
+                    judgments.append(0)
+                else:
+                    # Default to 0 if unclear
+                    print(f"Warning: Unclear judge response: '{response}' - defaulting to 0")
+                    judgments.append(0)
+    
+    return judgments
+
+def process_json_file(file_path: str, judge_llm: LLM, force: bool = False, batch_size: int = 10) -> bool:
     """Process a single JSON file and add judgments."""
     print(f"Processing {file_path}...")
     
@@ -94,9 +149,11 @@ def process_json_file(file_path: str, judge_llm: LLM) -> bool:
             data = json.load(f)
         
         # Check if judgments already exist
-        if 'judgments' in data:
+        if 'judgments' in data and not force:
             print(f"  Judgments already exist in {file_path}, skipping...")
             return True
+        elif 'judgments' in data and force:
+            print(f"  Judgments already exist in {file_path}, recomputing...")
         
         # Get rollouts
         rollouts = data.get('rollouts', [])
@@ -104,16 +161,10 @@ def process_json_file(file_path: str, judge_llm: LLM) -> bool:
             print(f"  No rollouts found in {file_path}")
             return True
         
-        print(f"  Judging {len(rollouts)} rollouts...")
+        print(f"  Judging {len(rollouts)} rollouts in batches of {batch_size}...")
         
-        # Judge each rollout
-        judgments = []
-        for i, rollout in enumerate(rollouts):
-            if i % 50 == 0:  # Progress update every 50 rollouts
-                print(f"    Progress: {i}/{len(rollouts)}")
-            
-            judgment = judge_rollout(rollout, judge_llm)
-            judgments.append(judgment)
+        # Judge rollouts in batches for efficiency
+        judgments = judge_rollouts_batch(rollouts, judge_llm, batch_size)
         
         # Add judgments to data
         data['judgments'] = judgments
@@ -130,7 +181,7 @@ def process_json_file(file_path: str, judge_llm: LLM) -> bool:
         print(f"  ✗ Error processing {file_path}: {e}")
         return False
 
-def process_directory(directory_path: str, judge_llm: LLM) -> None:
+def process_directory(directory_path: str, judge_llm: LLM, force: bool = False, batch_size: int = 10) -> None:
     """Process all JSON files in a directory."""
     directory = Path(directory_path)
     if not directory.exists():
@@ -148,7 +199,7 @@ def process_directory(directory_path: str, judge_llm: LLM) -> None:
     failed = 0
     
     for json_file in json_files:
-        if process_json_file(str(json_file), judge_llm):
+        if process_json_file(str(json_file), judge_llm, force, batch_size):
             successful += 1
         else:
             failed += 1
@@ -167,6 +218,10 @@ def main():
                        help="GPU memory utilization for judge model")
     parser.add_argument("--max-model-len", type=int, default=32768,
                        help="Maximum model length")
+    parser.add_argument("--force", action="store_true",
+                       help="Recompute judgments even if they already exist")
+    parser.add_argument("--batch-size", type=int, default=50,
+                       help="Number of rollouts to judge in each batch")
     
     args = parser.parse_args()
     
@@ -190,10 +245,10 @@ def main():
             print(f"Error: {args.input} is not a JSON file")
             sys.exit(1)
         
-        process_json_file(str(input_path), judge_llm)
+        process_json_file(str(input_path), judge_llm, args.force, args.batch_size)
     elif input_path.is_dir():
         # Process directory
-        process_directory(str(input_path), judge_llm)
+        process_directory(str(input_path), judge_llm, args.force, args.batch_size)
     else:
         print(f"Error: {args.input} is neither a file nor a directory")
         sys.exit(1)
