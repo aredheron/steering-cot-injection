@@ -48,7 +48,15 @@ Answer:"""
 
 def judge_rollout(rollout_text: str, judge_llm: LLM) -> int:
     """Judge a single rollout and return 1 for chocolate cake recipe, 0 otherwise."""
-    prompt = create_judge_prompt(rollout_text)
+    # Consider only the portion of the rollout after the closing think tag.
+    marker = "</think>"
+    marker_idx = rollout_text.find(marker)
+    if marker_idx == -1:
+        # No think section found; by requirement, automatically return 0
+        return 0
+    judged_segment = rollout_text[marker_idx + len(marker):].strip()
+
+    prompt = create_judge_prompt(judged_segment)
     
     sampling_params = SamplingParams(
         temperature=0.0,  # Deterministic output

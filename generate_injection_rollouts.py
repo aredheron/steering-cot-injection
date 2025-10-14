@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+DIRECTORY = "/workspace/steering-cot-injection"
+
 def load_cleaned_sentences(cleaned_file):
     """Load the cleaned sentences from the injection output file."""
     with open(cleaned_file, 'r', encoding='utf-8') as f:
@@ -17,32 +19,33 @@ def load_base_prompt(prompt_file):
     with open(prompt_file, 'r', encoding='utf-8') as f:
         return f.read()
 
-def create_modified_prompt(base_prompt, injection_sentence):
-    """Create a modified prompt by appending the injection sentence after 'I should consider the ingredients.'"""
-    # Keep the base prompt as is, then add the injection sentence
-    # Remove any trailing period from injection sentence to avoid double periods
-    injection_clean = injection_sentence.rstrip().rstrip('.')
-    return f"{base_prompt.rstrip()}\n\n{injection_clean}."
+def create_modified_prompt(base_prompt, injection_sentence, repeat_count: int = 1):
+    """Create a modified prompt by appending the injection sentence repeated
+    repeat_count times after the base chain-of-thought line.
+    """
+    sentence_core = injection_sentence.strip().rstrip('.')
+    repeated = " ".join(f"{sentence_core}." for _ in range(max(1, int(repeat_count))))
+    return f"{base_prompt.rstrip()}\n\n{repeated}"
 
-def generate_rollouts_for_sentence(sentence, index, base_prompt, output_dir, max_tokens=1000):
+def generate_rollouts_for_sentence(sentence, index, base_prompt, output_dir, max_tokens=1000, repeat_count: int = 1):
     """Generate 200 rollouts for a specific injection sentence."""
-    print(f"Generating rollouts for sentence {index}: {sentence[:50]}...")
+    print(f"Generating rollouts for sentence {index} (repeat={repeat_count}): {sentence[:50]}...")
     
     # Create modified prompt
-    modified_prompt = create_modified_prompt(base_prompt, sentence)
+    modified_prompt = create_modified_prompt(base_prompt, sentence, repeat_count)
     
     # Create temporary prompt file
-    temp_prompt_file = f"/tmp/prompt_injection_{index}.txt"
+    temp_prompt_file = f"/tmp/prompt_injection_{index}_r{repeat_count}.txt"
     with open(temp_prompt_file, 'w', encoding='utf-8') as f:
         f.write(modified_prompt)
     
     # Output file path
-    output_file = os.path.join(output_dir, f"rollouts_injection_{index}_cake.json")
+    output_file = os.path.join(output_dir, f"rollouts_injection_{index}_r{repeat_count}_cake.json")
     
     try:
         # Run the generation script
         cmd = [
-            'python', '/workspace/experiment_1/generate_rollouts.py',
+            'python', f"{DIRECTORY}/generate_rollouts.py",
             '--prompt-file', temp_prompt_file,
             '--output-file', output_file,
             '--n', '200',
@@ -73,7 +76,7 @@ def generate_rollouts_for_sentence(sentence, index, base_prompt, output_dir, max
         if os.path.exists(temp_prompt_file):
             os.remove(temp_prompt_file)
 
-def generate_rollouts_batch(sentences_batch, indices_batch, base_prompt, output_dir, max_tokens=1000):
+def generate_rollouts_batch(sentences_batch, indices_batch, base_prompt, output_dir, max_tokens=1000, repeat_counts: list[int] | None = None):
     """Generate rollouts for a batch of sentences using parallel subprocess calls."""
     print(f"Generating batch for sentences {indices_batch[0]}-{indices_batch[-1]} ({len(sentences_batch)} sentences)")
     
@@ -81,44 +84,46 @@ def generate_rollouts_batch(sentences_batch, indices_batch, base_prompt, output_
     import threading
     
     # Use ThreadPoolExecutor to run multiple generations in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(sentences_batch), 4)) as executor:
+    counts = repeat_counts or [1]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(sentences_batch) * len(counts), 4)) as executor:
         # Submit all tasks
-        future_to_index = {}
-        for i, (sentence, index) in enumerate(zip(sentences_batch, indices_batch)):
-            future = executor.submit(
-                generate_rollouts_for_sentence, 
-                sentence, index, base_prompt, output_dir, max_tokens
-            )
-            future_to_index[future] = index
+        future_to_key = {}
+        for sentence, index in zip(sentences_batch, indices_batch):
+            for repeat_count in counts:
+                future = executor.submit(
+                    generate_rollouts_for_sentence,
+                    sentence, index, base_prompt, output_dir, max_tokens, repeat_count
+                )
+                future_to_key[future] = (index, repeat_count)
         
         # Collect results
         successful = 0
         failed = 0
         
-        for future in concurrent.futures.as_completed(future_to_index):
-            index = future_to_index[future]
+        for future in concurrent.futures.as_completed(future_to_key):
+            index, repeat_count = future_to_key[future]
             try:
                 success = future.result()
                 if success:
                     successful += 1
-                    print(f"  ✓ Completed sentence {index}")
+                    print(f"  ✓ Completed sentence {index} (repeat={repeat_count})")
                 else:
                     failed += 1
-                    print(f"  ✗ Failed sentence {index}")
+                    print(f"  ✗ Failed sentence {index} (repeat={repeat_count})")
             except Exception as e:
                 failed += 1
-                print(f"  ✗ Exception for sentence {index}: {e}")
+                print(f"  ✗ Exception for sentence {index} (repeat={repeat_count}): {e}")
     
     print(f"Batch complete: {successful} successful, {failed} failed")
     return failed == 0
 
 def main():
     parser = argparse.ArgumentParser(description="Generate rollouts for each injection sentence")
-    parser.add_argument("--cleaned-file", type=str, default="/workspace/experiment_1/outputs/output_injection_cake_cleaned.json", 
+    parser.add_argument("--cleaned-file", type=str, default=f"{DIRECTORY}/outputs/output_injection_cake_cleaned.json", 
                        help="Path to the cleaned injection output file")
-    parser.add_argument("--base-prompt", type=str, default="/workspace/experiment_1/prompts/prompt_continuation_cake.txt",
+    parser.add_argument("--base-prompt", type=str, default=f"{DIRECTORY}/prompts/prompt_continuation_cake.txt",
                        help="Path to the base prompt continuation file")
-    parser.add_argument("--output-dir", type=str, default="/workspace/experiment_1/rollouts",
+    parser.add_argument("--output-dir", type=str, default=f"{DIRECTORY}/rollouts",
                        help="Directory to save the generated rollout files")
     parser.add_argument("--max-tokens", type=int, default=4000,
                        help="Maximum tokens per rollout")
@@ -128,6 +133,8 @@ def main():
                        help="Ending index (for partial runs)")
     parser.add_argument("--batch-size", type=int, default=1,
                        help="Number of sentences to process in each batch (1 = no batching)")
+    parser.add_argument("--repeat-counts", nargs='+', default=["1"],
+                       help="List of repetition counts (supports CSV or space-separated), e.g. 1,3,4 or 1 3 4")
     
     args = parser.parse_args()
     
@@ -148,6 +155,22 @@ def main():
     start_index = args.start_index
     
     print(f"Processing sentences {start_index} to {end_index-1}")
+    # Parse repeat counts list from CSV and/or space-separated input
+    repeat_counts: list[int] = []
+    for token in args.repeat_counts:
+        for part in str(token).split(','):
+            piece = part.strip()
+            if not piece:
+                continue
+            try:
+                value = int(piece)
+                if value >= 1:
+                    repeat_counts.append(value)
+            except ValueError:
+                continue
+    if not repeat_counts:
+        repeat_counts = [1]
+    print(f"Repeat counts: {repeat_counts}")
     
     # Generate rollouts for each sentence (with optional batching)
     successful = 0
@@ -160,14 +183,15 @@ def main():
                 break
                 
             sentence = sentences[i]
-            success = generate_rollouts_for_sentence(
-                sentence, i, base_prompt, args.output_dir, args.max_tokens
-            )
-            
-            if success:
-                successful += 1
-            else:
-                failed += 1
+            for rc in repeat_counts:
+                success = generate_rollouts_for_sentence(
+                    sentence, i, base_prompt, args.output_dir, args.max_tokens, rc
+                )
+                
+                if success:
+                    successful += 1
+                else:
+                    failed += 1
             
             print(f"Progress: {i+1}/{len(sentences)} (Success: {successful}, Failed: {failed})")
     else:
@@ -181,13 +205,13 @@ def main():
             
             print(f"\nProcessing batch: sentences {batch_start}-{batch_end-1}")
             success = generate_rollouts_batch(
-                batch_sentences, batch_indices, base_prompt, args.output_dir, args.max_tokens
+                batch_sentences, batch_indices, base_prompt, args.output_dir, args.max_tokens, repeat_counts
             )
             
             if success:
-                successful += len(batch_sentences)
+                successful += len(batch_sentences) * len(repeat_counts)
             else:
-                failed += len(batch_sentences)
+                failed += len(batch_sentences) * len(repeat_counts)
             
             print(f"Progress: {batch_end}/{len(sentences)} (Success: {successful}, Failed: {failed})")
     
