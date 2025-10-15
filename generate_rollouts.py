@@ -6,6 +6,7 @@ from typing import List
 
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
+from pathlib import Path
 
 # Single global LLM to avoid reloading
 _llm = None
@@ -21,7 +22,7 @@ def load_llm(
     if _llm is None:
         _llm = LLM(
             model=model_name,
-            dtype=dtype,  # "half" or "bfloat16" if supported
+            dtype=dtype,
             trust_remote_code=True,
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=gpu_memory_utilization,
@@ -177,6 +178,10 @@ def main():
         "rollouts": rollouts,
     }
 
+    # Create output directory if it doesn't exist
+    output_path = Path(args.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
     with open(args.output_file, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 

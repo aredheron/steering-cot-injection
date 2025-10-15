@@ -7,19 +7,25 @@ import sys
 def extract_answer_content(text):
     """
     Extract content from <answer> tags, handling various malformed formats.
-    Returns the content if found, None otherwise.
+    Returns a list of all answer contents found, empty list if none found.
     """
-    # Split by <answer> tags and find the last complete answer
-    parts = text.split('<answer>')
+    answers = []
     
-    for part in reversed(parts[1:]):  # Skip first part, go in reverse order
-        if '</answer>' in part:
-            answer_content = part.split('</answer>')[0].strip()
-            # Clean up any remaining answer tags
-            answer_content = re.sub(r'\(/?answer\)', '', answer_content).strip()
-            # Only return if it looks like a complete sentence
-            if len(answer_content) > 10 and not answer_content.startswith('tags as specified'):
-                return answer_content
+    # First, try to find all properly formatted <answer>content</answer> pairs
+    pattern1 = r'<answer>(.*?)</answer>'
+    matches1 = re.findall(pattern1, text, re.IGNORECASE | re.DOTALL)
+    
+    for match in matches1:
+        answer_content = match.strip()
+        # Clean up any remaining answer tags
+        answer_content = re.sub(r'\(/?answer\)', '', answer_content).strip()
+        # Only keep if it looks like a complete sentence
+        if len(answer_content) > 10 and not answer_content.startswith('tags as specified'):
+            answers.append(answer_content)
+    
+    # If we found proper answer tags, return them
+    if answers:
+        return answers
     
     # Try to match malformed patterns like (answer)content
     pattern2 = r'\(answer\)(.*?)(?=\n|$)'
@@ -29,7 +35,8 @@ def extract_answer_content(text):
         content = match2.group(1).strip()
         # Clean up any remaining answer tags
         content = re.sub(r'\(/?answer\)', '', content).strip()
-        return content
+        if len(content) > 10 and not content.startswith('tags as specified'):
+            answers.append(content)
     
     # Try to match incomplete tags like <answer>content (no closing tag)
     # This should be more restrictive to avoid capturing too much
@@ -40,11 +47,11 @@ def extract_answer_content(text):
         content = match3.group(1).strip()
         # Clean up any remaining answer tags
         content = re.sub(r'\(/?answer\)', '', content).strip()
-        # Only return if the content looks like a complete sentence
+        # Only keep if the content looks like a complete sentence
         if len(content) > 10 and not content.startswith('tags as specified'):
-            return content
+            answers.append(content)
     
-    return None
+    return answers
 
 def main():
     parser = argparse.ArgumentParser(description="Clean injection output by extracting only properly formatted answers")
@@ -65,10 +72,15 @@ def main():
         cleaned_rollouts = []
         
         for i, rollout in enumerate(rollouts):
-            answer_content = extract_answer_content(rollout)
-            if answer_content:
-                cleaned_rollouts.append(answer_content)
-                print(f"✓ Kept rollout {i}: {answer_content[:50]}...")
+            answer_contents = extract_answer_content(rollout)
+            if answer_contents:
+                # Add all answers found in this rollout
+                for j, answer_content in enumerate(answer_contents):
+                    cleaned_rollouts.append(answer_content)
+                    if len(answer_contents) > 1:
+                        print(f"✓ Kept rollout {i}, answer {j+1}: {answer_content[:50]}...")
+                    else:
+                        print(f"✓ Kept rollout {i}: {answer_content[:50]}...")
             else:
                 print(f"✗ Removed rollout {i}: No proper answer format found")
         
