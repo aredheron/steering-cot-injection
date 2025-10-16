@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import os
+import math
 import re
 import sys
 from pathlib import Path
-from typing import List, Union, Tuple
+from typing import List, Tuple
 
 from vllm import LLM, SamplingParams
 
-# Global LLM instance
+# ------------------------------- Model cache -------------------------------
 _llm = None
+_tokenizer = None
 
 def load_model(
     model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
@@ -19,8 +20,7 @@ def load_model(
     gpu_memory_utilization: float = 0.7,
     max_model_len: int = 32768,
 ) -> LLM:
-    """Load the model for computing log probabilities."""
-    global _llm
+    global _llm, _tokenizer
     if _llm is None:
         _llm = LLM(
             model=model_name,
@@ -30,164 +30,229 @@ def load_model(
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
         )
+        _tokenizer = _llm.get_tokenizer()
     return _llm
 
+# ------------------------------- Utilities --------------------------------
 def extract_last_sentence(prompt: str) -> Tuple[str, str]:
-    """Extract the last sentence from the prompt and return (history, last_sentence)."""
-    # Find the last sentence by looking for sentence-ending punctuation
-    # Split on periods, exclamation marks, and question marks
     sentences = re.split(r'[.!?]+', prompt.strip())
-    
-    # Filter out empty strings and get the last non-empty sentence
-    non_empty_sentences = [s.strip() for s in sentences if s.strip()]
-    
-    if not non_empty_sentences:
+    non_empty = [s.strip() for s in sentences if s.strip()]
+    if not non_empty:
         return prompt, ""
-    
-    last_sentence = non_empty_sentences[-1]
-    
-    # Find where the last sentence starts in the original prompt
-    last_sentence_start = prompt.rfind(last_sentence)
-    history = prompt[:last_sentence_start].strip()
-    
-    return history, last_sentence
+    last = non_empty[-1]
+    start = prompt.rfind(last)
+    history = prompt[:start].strip()
+    return history, last
 
-def compute_log_probs(prompt: str, llm: LLM) -> Tuple[List[float], float]:
-    """Compute log probabilities for each token in the last sentence of the prompt."""
+def encode_no_specials(text: str) -> List[int]:
+    return _tokenizer.encode(text, add_special_tokens=False)
+
+def prompt_offset_correction(full_prompt_tokens_len: int, vllm_prompt_ids_len: int) -> int:
+    # Compensate if vLLM added BOS or other specials
+    return vllm_prompt_ids_len - full_prompt_tokens_len
+
+def nucleus_adjusted_logprob_for_token(
+    token_id: int,
+    step_logprob_dict: dict,
+    p: float,
+    fallback_lp: float = -12.0,
+) -> float:
+    # step_logprob_dict: {tid: LogProbObject|float log p_full} (top-20 only)
+    pairs = []
+    for tid, obj in step_logprob_dict.items():
+        lp = obj.logprob if hasattr(obj, "logprob") else float(obj)
+        pairs.append((int(tid), float(lp)))
+
+    # Sort by prob
+    pairs.sort(key=lambda x: x[1], reverse=True)
+
+    kept = []
+    cum = 0.0
+    for tid, lp in pairs:
+        pr = math.exp(lp)
+        kept.append((tid, pr))
+        cum += pr
+        if cum >= p:
+            break
+
+    # If we cannot reach p with available top-20, we can’t form the nucleus -> fallback
+    if cum < p:
+        return fallback_lp
+
+    Z = sum(pr for _, pr in kept)
+    kept_logp = {tid: math.log(pr / Z) for tid, pr in kept}
+    return kept_logp.get(token_id, fallback_lp)
+
+# ------------------------- Core computation -------------------------------
+def compute_log_probs(
+    prompt: str,
+    llm: LLM,
+    top_p: float = 0.95,
+    k_prompt_logprobs: int = 20,       # vLLM max is 20
+    t_full: float = 1.0,
+    t_top_p: float = 0.6,
+    fallback_lp: float = -12.0,
+) -> Tuple[List[float], float, List[float], float]:
+    """
+    Returns:
+        (log_probs_T1, avg_T1, log_probs_top_p_T0p6, avg_top_p_T0p6)
+        for tokens in the last sentence of the prompt.
+    """
     history, last_sentence = extract_last_sentence(prompt)
-    
     if not last_sentence:
-        return [], 0.0
-    
-    # Create the full prompt for the model
-    full_prompt = history + " " + last_sentence if history else last_sentence
-    
-    # Use prompt_logprobs to get token-level log probabilities
-    sampling_params = SamplingParams(
-        temperature=0.0,  # Deterministic
-        max_tokens=1,     # We only need the log probs, not generation
-        prompt_logprobs=1,  # Get log probs for the prompt tokens
-    )
-    
-    outputs = llm.generate([full_prompt], sampling_params)
-    output = outputs[0]
-    
-    # Get the log probabilities for the prompt tokens
-    prompt_logprobs = output.prompt_logprobs
-    
-    if not prompt_logprobs:
-        return [], 0.0
-    
-    # Find where the last sentence starts in the tokenized prompt
-    # We need to tokenize the history to find the boundary
-    history_tokens = llm.get_tokenizer().encode(history) if history else []
-    history_token_count = len(history_tokens)
-    
-    # Get log probs only for the last sentence tokens
-    last_sentence_logprobs = prompt_logprobs[history_token_count:]
-    
-    # Extract the actual log probability values
-    log_probs = []
-    for token_logprob in last_sentence_logprobs:
-        if token_logprob and len(token_logprob) > 0:
-            # Get the log prob of the actual token that was generated
-            token_id = list(token_logprob.keys())[0]
-            log_prob_obj = token_logprob[token_id]
-            # Extract the log probability value from the Logprob object
-            if hasattr(log_prob_obj, 'logprob'):
-                log_prob = log_prob_obj.logprob
-            else:
-                log_prob = float(log_prob_obj)
-            log_probs.append(log_prob)
-    
-    # Calculate average log probability
-    avg_log_prob = sum(log_probs) / len(log_probs) if log_probs else 0.0
-    
-    return log_probs, avg_log_prob
+        return [], 0.0, [], 0.0
 
-def process_json_file(file_path: str, llm: LLM, recompute: bool = False) -> bool:
-    """Process a single JSON file and add log probabilities."""
+    full_prompt = (history + " " + last_sentence).strip() if history else last_sentence
+
+    # Temperature=1.0, no nucleus; we want prompt logprobs for last-sentence tokens
+    params_t1 = SamplingParams(
+        max_tokens=1,
+        prompt_logprobs=min(k_prompt_logprobs, 20),
+        temperature=t_full,
+        top_p=1.0,
+    )
+    out_t1 = llm.generate([full_prompt], params_t1)[0]
+    plp_t1 = out_t1.prompt_logprobs
+    prompt_token_ids = out_t1.prompt_token_ids
+
+    # Temperature=0.6; we’ll apply top-p ourselves using available top-20
+    params_t06 = SamplingParams(
+        max_tokens=1,
+        prompt_logprobs=min(k_prompt_logprobs, 20),
+        temperature=t_top_p,
+        top_p=1.0,
+    )
+    out_t06 = llm.generate([full_prompt], params_t06)[0]
+    plp_t06 = out_t06.prompt_logprobs
+
+    # Align boundary: compensate for any specials vLLM may add
+    full_prompt_tok_ids = encode_no_specials(full_prompt)
+    offset = prompt_offset_correction(len(full_prompt_tok_ids), len(prompt_token_ids))
+    history_tok_count = (offset + len(encode_no_specials(history))) if history else offset
+
+    # Sanity
+    assert len(plp_t1) == len(prompt_token_ids) == len(plp_t06), "length mismatch"
+
+    # Slice to last-sentence tokens
+    plp_t1_last = plp_t1[history_tok_count:]
+    plp_t06_last = plp_t06[history_tok_count:]
+    toks_last = prompt_token_ids[history_tok_count:]
+
+    # T=1.0 log-probs for the actual tokens; fallback if not in top-20
+    log_probs = []
+    for tok_id, step_dict in zip(toks_last, plp_t1_last):
+        obj = step_dict.get(tok_id)
+        if obj is None:
+            log_probs.append(fallback_lp)
+        else:
+            lp = obj.logprob if hasattr(obj, "logprob") else float(obj)
+            log_probs.append(float(lp))
+
+    # top-p=0.95 at T=0.6 using available top-20; fallback if token outside nucleus
+    log_probs_top_p = []
+    for tok_id, step_dict in zip(toks_last, plp_t06_last):
+        lp_adj = nucleus_adjusted_logprob_for_token(tok_id, step_dict, p=top_p, fallback_lp=fallback_lp)
+        log_probs_top_p.append(lp_adj)
+
+    def avg_nonempty(values: List[float]) -> float:
+        vals = [v for v in values if v != float("-inf")]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    avg_log_prob = avg_nonempty(log_probs)
+    avg_log_prob_top_p = avg_nonempty(log_probs_top_p)
+
+    return log_probs, avg_log_prob, log_probs_top_p, avg_log_prob_top_p
+
+# ------------------------------- I/O layer --------------------------------
+def process_json_file(
+    file_path: str,
+    llm: LLM,
+    recompute: bool,
+    k_prompt_logprobs: int,
+    fallback_lp: float,
+) -> bool:
     print(f"Processing {file_path}...")
-    
     try:
-        # Load the JSON file
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
-        # Check if log probs already exist (unless recompute is True)
-        if 'log_probs' in data and not recompute:
-            print(f"  Log probabilities already exist in {file_path}, skipping...")
+
+        if all(k in data for k in ("log_probs", "log_probs_top_p")) and not recompute:
+            print(f"  Log probabilities already exist, skipping")
             return True
-        
-        # Get the prompt
-        prompt = data.get('prompt', '')
+
+        prompt = data.get("prompt", "")
         if not prompt:
-            print(f"  No prompt found in {file_path}")
+            print("  No prompt found")
             return True
-        
-        print(f"  Computing log probabilities for prompt...")
-        
-        # Compute log probabilities
-        log_probs, avg_log_prob = compute_log_probs(prompt, llm)
-        
-        # Add log probabilities to data
-        data['log_probs'] = log_probs
-        data['avg_log_prob'] = avg_log_prob
-        
-        # Save the updated file
-        with open(file_path, 'w', encoding='utf-8') as f:
+
+        lps, avg, lps_tp, avg_tp = compute_log_probs(
+            prompt,
+            llm,
+            top_p=0.95,
+            k_prompt_logprobs=min(k_prompt_logprobs, 20),
+            t_full=1.0,
+            t_top_p=0.6,
+            fallback_lp=fallback_lp,
+        )
+
+        data["log_probs"] = lps                       # T=1.0 (top-20 only; fallback if missing)
+        data["avg_log_prob"] = avg
+        data["log_probs_top_p"] = lps_tp              # p=0.95 @ T=0.6
+        data["avg_log_prob_top_p"] = avg_tp
+
+        with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        print(f"  ✓ Added {len(log_probs)} log probabilities (avg: {avg_log_prob:.4f})")
+
+        print(f"  ✓ T=1.0 tokens: {len(lps)}  avg={avg:.6f}")
+        print(f"  ✓ top-p=0.95 @ T=0.6 tokens: {len(lps_tp)}  avg={avg_tp:.6f}")
         return True
-        
+
     except Exception as e:
-        print(f"  ✗ Error processing {file_path}: {e}")
+        print(f"  ✗ Error: {e}")
         return False
 
-def process_directory(directory_path: str, llm: LLM, recompute: bool = False) -> None:
-    """Process all JSON files in a directory."""
+def process_directory(
+    directory_path: str,
+    llm: LLM,
+    recompute: bool,
+    k_prompt_logprobs: int,
+    fallback_lp: float,
+) -> None:
     directory = Path(directory_path)
     if not directory.exists():
         print(f"Error: Directory {directory_path} does not exist")
         return
-    
     json_files = list(directory.glob("*.json"))
     if not json_files:
         print(f"No JSON files found in {directory_path}")
         return
-    
-    print(f"Found {len(json_files)} JSON files to process")
-    
-    successful = 0
-    failed = 0
-    
-    for json_file in json_files:
-        if process_json_file(str(json_file), llm, recompute):
-            successful += 1
+    print(f"Found {len(json_files)} JSON files")
+    ok = 0
+    bad = 0
+    for jf in json_files:
+        if process_json_file(str(jf), llm, recompute, k_prompt_logprobs, fallback_lp):
+            ok += 1
         else:
-            failed += 1
-    
-    print(f"\nCompleted! Processed {successful} files successfully, {failed} failed")
+            bad += 1
+    print(f"\nCompleted. Success={ok}  Failed={bad}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute log probabilities for the last sentence of prompts")
-    parser.add_argument("input", help="JSON file or directory containing JSON files to process")
-    parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
-                       help="Model to use for computing log probabilities")
-    parser.add_argument("--dtype", type=str, default="half", choices=["half", "bfloat16", "float16"],
-                       help="Model dtype")
+    parser = argparse.ArgumentParser(
+        description="Compute token log-probs for the last sentence of prompts."
+    )
+    parser.add_argument("input", help="JSON file or directory")
+    parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
+    parser.add_argument("--dtype", type=str, default="half", choices=["half", "bfloat16", "float16"])
     parser.add_argument("--tp", type=int, default=1, help="tensor_parallel_size")
-    parser.add_argument("--gpu-mem-util", type=float, default=0.7,
-                       help="GPU memory utilization for model")
-    parser.add_argument("--max-model-len", type=int, default=32768,
-                       help="Maximum model length")
-    parser.add_argument("--recompute", action="store_true",
-                       help="Recompute and overwrite existing log probabilities")
-    
+    parser.add_argument("--gpu-mem-util", type=float, default=0.7)
+    parser.add_argument("--max-model-len", type=int, default=32768)
+    parser.add_argument("--recompute", action="store_true")
+    parser.add_argument("--k-prompt-logprobs", type=int, default=20,
+                        help="max 20 due to vLLM limit")
+    parser.add_argument("--fallback-lp", type=float, default=-12.0,
+                        help="log-prob to use when token not retrievable or outside top-p")
     args = parser.parse_args()
-    
-    # Load the model
+
     print("Loading model...")
     llm = load_model(
         model_name=args.model,
@@ -196,21 +261,16 @@ def main():
         gpu_memory_utilization=args.gpu_mem_util,
         max_model_len=args.max_model_len,
     )
-    print("Model loaded!")
-    
-    # Process input
-    input_path = Path(args.input)
-    
-    if input_path.is_file():
-        # Process single file
-        if input_path.suffix.lower() != '.json':
+    print("Model loaded.")
+
+    p = Path(args.input)
+    if p.is_file():
+        if p.suffix.lower() != ".json":
             print(f"Error: {args.input} is not a JSON file")
             sys.exit(1)
-        
-        process_json_file(str(input_path), llm, args.recompute)
-    elif input_path.is_dir():
-        # Process directory
-        process_directory(str(input_path), llm, args.recompute)
+        process_json_file(str(p), llm, args.recompute, args.k_prompt_logprobs, args.fallback_lp)
+    elif p.is_dir():
+        process_directory(str(p), llm, args.recompute, args.k_prompt_logprobs, args.fallback_lp)
     else:
         print(f"Error: {args.input} is neither a file nor a directory")
         sys.exit(1)
