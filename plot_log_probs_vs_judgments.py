@@ -12,7 +12,7 @@ def extract_data_from_files(deepseek_count=24, llama_count=16):
     # Extract DeepSeek data (blue)
     print("Extracting DeepSeek data...")
     for i in range(deepseek_count):
-        file_path = f"rollouts/rollouts_injection_{i}_cake.json"
+        file_path = f"rollouts/deepseek-distill/rollouts_injection_{i}_cake.json"
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -21,15 +21,17 @@ def extract_data_from_files(deepseek_count=24, llama_count=16):
             # Extract the required fields
             avg_log_prob = data.get('avg_log_prob', None)
             avg_log_prob_top_p = data.get('avg_log_prob_top_p', None)
+            log_probs_no_prefix_avg = data.get('log_probs_no_prefix_avg', None)
             judgment_sum = data.get('judgment_sum', None)
             log_probs = data.get('log_probs', [])
             sentence_length = len(log_probs) if log_probs else None
             
-            if avg_log_prob is not None and avg_log_prob_top_p is not None and judgment_sum is not None and sentence_length is not None:
+            if avg_log_prob is not None and avg_log_prob_top_p is not None and log_probs_no_prefix_avg is not None and judgment_sum is not None and sentence_length is not None:
                 data_points.append({
                     'injection_id': i,
                     'avg_log_prob': avg_log_prob,
                     'avg_log_prob_top_p': avg_log_prob_top_p,
+                    'log_probs_no_prefix_avg': log_probs_no_prefix_avg,
                     'judgment_sum': judgment_sum,
                     'sentence_length': sentence_length,
                     'model': 'DeepSeek-R1-Distill-Qwen-14B'
@@ -55,15 +57,17 @@ def extract_data_from_files(deepseek_count=24, llama_count=16):
             # Extract the required fields
             avg_log_prob = data.get('avg_log_prob', None)
             avg_log_prob_top_p = data.get('avg_log_prob_top_p', None)
+            log_probs_no_prefix_avg = data.get('log_probs_no_prefix_avg', None)
             judgment_sum = data.get('judgment_sum', None)
             log_probs = data.get('log_probs', [])
             sentence_length = len(log_probs) if log_probs else None
             
-            if avg_log_prob is not None and avg_log_prob_top_p is not None and judgment_sum is not None and sentence_length is not None:
+            if avg_log_prob is not None and avg_log_prob_top_p is not None and log_probs_no_prefix_avg is not None and judgment_sum is not None and sentence_length is not None:
                 data_points.append({
                     'injection_id': i,
                     'avg_log_prob': avg_log_prob,
                     'avg_log_prob_top_p': avg_log_prob_top_p,
+                    'log_probs_no_prefix_avg': log_probs_no_prefix_avg,
                     'judgment_sum': judgment_sum,
                     'sentence_length': sentence_length,
                     'model': 'Llama'
@@ -143,12 +147,19 @@ def create_plot(data_points):
     
     # Add correlation info
     correlation_text = f'Overall Correlation: {overall_correlation:.3f} (p={overall_p_value:.3f})'
-    if deepseek_data and llama_data:
+    
+    # Calculate correlations for each model
+    deepseek_corr, deepseek_p = None, None
+    llama_corr, llama_p = None, None
+    
+    if deepseek_data:
         deepseek_corr, deepseek_p = calculate_correlation_with_pvalue([point['avg_log_prob'] for point in deepseek_data], 
                                                                      [point['judgment_sum'] for point in deepseek_data])
+        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
+    
+    if llama_data:
         llama_corr, llama_p = calculate_correlation_with_pvalue([point['avg_log_prob'] for point in llama_data], 
                                                                [point['judgment_sum'] for point in llama_data])
-        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
         correlation_text += f'\nLlama: {llama_corr:.3f} (p={llama_p:.3f})'
     
     plt.text(0.05, 0.95, correlation_text, transform=plt.gca().transAxes, 
@@ -166,12 +177,12 @@ def create_plot(data_points):
     print(f"Llama data points: {len(llama_data)}")
     print(f"Overall correlation coefficient: {overall_correlation:.4f} (p-value: {overall_p_value:.4f})")
     
-    if deepseek_data:
+    if deepseek_data and deepseek_corr is not None:
         print(f"DeepSeek correlation: {deepseek_corr:.4f} (p-value: {deepseek_p:.4f})")
         print(f"DeepSeek log prob range: {min([p['avg_log_prob'] for p in deepseek_data]):.4f} to {max([p['avg_log_prob'] for p in deepseek_data]):.4f}")
         print(f"DeepSeek judgment range: {min([p['judgment_sum'] for p in deepseek_data])} to {max([p['judgment_sum'] for p in deepseek_data])}")
     
-    if llama_data:
+    if llama_data and llama_corr is not None:
         print(f"Llama correlation: {llama_corr:.4f} (p-value: {llama_p:.4f})")
         print(f"Llama log prob range: {min([p['avg_log_prob'] for p in llama_data]):.4f} to {max([p['avg_log_prob'] for p in llama_data]):.4f}")
         print(f"Llama judgment range: {min([p['judgment_sum'] for p in llama_data])} to {max([p['judgment_sum'] for p in llama_data])}")
@@ -235,12 +246,19 @@ def create_sentence_length_plot(data_points):
     
     # Add correlation info
     correlation_text = f'Overall Correlation: {overall_correlation:.3f} (p={overall_p_value:.3f})'
-    if deepseek_data and llama_data:
+    
+    # Calculate correlations for each model
+    deepseek_corr, deepseek_p = None, None
+    llama_corr, llama_p = None, None
+    
+    if deepseek_data:
         deepseek_corr, deepseek_p = calculate_correlation_with_pvalue([point['sentence_length'] for point in deepseek_data], 
                                                                      [point['judgment_sum'] for point in deepseek_data])
+        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
+    
+    if llama_data:
         llama_corr, llama_p = calculate_correlation_with_pvalue([point['sentence_length'] for point in llama_data], 
                                                                [point['judgment_sum'] for point in llama_data])
-        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
         correlation_text += f'\nLlama: {llama_corr:.3f} (p={llama_p:.3f})'
     
     plt.text(0.05, 0.95, correlation_text, transform=plt.gca().transAxes, 
@@ -258,12 +276,12 @@ def create_sentence_length_plot(data_points):
     print(f"Llama data points: {len(llama_data)}")
     print(f"Overall correlation coefficient: {overall_correlation:.4f} (p-value: {overall_p_value:.4f})")
     
-    if deepseek_data:
+    if deepseek_data and deepseek_corr is not None:
         print(f"DeepSeek sentence length range: {min([p['sentence_length'] for p in deepseek_data])} to {max([p['sentence_length'] for p in deepseek_data])}")
         print(f"DeepSeek judgment range: {min([p['judgment_sum'] for p in deepseek_data])} to {max([p['judgment_sum'] for p in deepseek_data])}")
         print(f"DeepSeek correlation: {deepseek_corr:.4f} (p-value: {deepseek_p:.4f})")
     
-    if llama_data:
+    if llama_data and llama_corr is not None:
         print(f"Llama sentence length range: {min([p['sentence_length'] for p in llama_data])} to {max([p['sentence_length'] for p in llama_data])}")
         print(f"Llama judgment range: {min([p['judgment_sum'] for p in llama_data])} to {max([p['judgment_sum'] for p in llama_data])}")
         print(f"Llama correlation: {llama_corr:.4f} (p-value: {llama_p:.4f})")
@@ -327,12 +345,19 @@ def create_top_p_plot(data_points):
     
     # Add correlation info
     correlation_text = f'Overall Correlation: {overall_correlation:.3f} (p={overall_p_value:.3f})'
-    if deepseek_data and llama_data:
+    
+    # Calculate correlations for each model
+    deepseek_corr, deepseek_p = None, None
+    llama_corr, llama_p = None, None
+    
+    if deepseek_data:
         deepseek_corr, deepseek_p = calculate_correlation_with_pvalue([point['avg_log_prob_top_p'] for point in deepseek_data], 
                                                                      [point['judgment_sum'] for point in deepseek_data])
+        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
+    
+    if llama_data:
         llama_corr, llama_p = calculate_correlation_with_pvalue([point['avg_log_prob_top_p'] for point in llama_data], 
                                                                [point['judgment_sum'] for point in llama_data])
-        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
         correlation_text += f'\nLlama: {llama_corr:.3f} (p={llama_p:.3f})'
     
     plt.text(0.05, 0.95, correlation_text, transform=plt.gca().transAxes, 
@@ -350,24 +375,126 @@ def create_top_p_plot(data_points):
     print(f"Llama data points: {len(llama_data)}")
     print(f"Overall correlation coefficient: {overall_correlation:.4f} (p-value: {overall_p_value:.4f})")
     
-    if deepseek_data:
+    if deepseek_data and deepseek_corr is not None:
         print(f"DeepSeek correlation: {deepseek_corr:.4f} (p-value: {deepseek_p:.4f})")
         print(f"DeepSeek top-p log prob range: {min([p['avg_log_prob_top_p'] for p in deepseek_data]):.4f} to {max([p['avg_log_prob_top_p'] for p in deepseek_data]):.4f}")
         print(f"DeepSeek judgment range: {min([p['judgment_sum'] for p in deepseek_data])} to {max([p['judgment_sum'] for p in deepseek_data])}")
     
-    if llama_data:
+    if llama_data and llama_corr is not None:
         print(f"Llama correlation: {llama_corr:.4f} (p-value: {llama_p:.4f})")
         print(f"Llama top-p log prob range: {min([p['avg_log_prob_top_p'] for p in llama_data]):.4f} to {max([p['avg_log_prob_top_p'] for p in llama_data]):.4f}")
         print(f"Llama judgment range: {min([p['judgment_sum'] for p in llama_data])} to {max([p['judgment_sum'] for p in llama_data])}")
 
+def create_log_prob_diff_plot(data_points):
+    """Create a scatter plot of (avg_log_prob - log_probs_no_prefix_avg) vs judgment_sum with different colors for each model."""
+    if not data_points:
+        print("No data points to plot")
+        return
+    
+    # Separate data by model
+    deepseek_data = [point for point in data_points if point['model'] == 'DeepSeek-R1-Distill-Qwen-14B']
+    llama_data = [point for point in data_points if point['model'] == 'Llama']
+    
+    # Create the plot
+    plt.figure(figsize=(12, 8))
+    
+    # Plot DeepSeek data in blue
+    if deepseek_data:
+        deepseek_log_prob_diff = [point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in deepseek_data]
+        deepseek_judgments = [point['judgment_sum'] for point in deepseek_data]
+        deepseek_ids = [point['injection_id'] for point in deepseek_data]
+        
+        plt.scatter(deepseek_log_prob_diff, deepseek_judgments, 
+                   c='blue', s=100, alpha=0.7, label=f'DeepSeek-R1-Distill-Qwen-14B (n={len(deepseek_data)})')
+        
+        # Add annotations for DeepSeek points
+        for i, (x, y) in enumerate(zip(deepseek_log_prob_diff, deepseek_judgments)):
+            plt.annotate(f'DS{deepseek_ids[i]}', (x, y), xytext=(5, 5), textcoords='offset points', 
+                        fontsize=8, color='blue')
+    
+    # Plot Llama data in red
+    if llama_data:
+        llama_log_prob_diff = [point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in llama_data]
+        llama_judgments = [point['judgment_sum'] for point in llama_data]
+        llama_ids = [point['injection_id'] for point in llama_data]
+        
+        plt.scatter(llama_log_prob_diff, llama_judgments, 
+                   c='red', s=100, alpha=0.7, label=f'Llama (n={len(llama_data)})')
+        
+        # Add annotations for Llama points
+        for i, (x, y) in enumerate(zip(llama_log_prob_diff, llama_judgments)):
+            plt.annotate(f'L{llama_ids[i]}', (x, y), xytext=(5, 5), textcoords='offset points', 
+                        fontsize=8, color='red')
+    
+    # Add labels and title
+    plt.xlabel('Log Probability Difference (avg_log_prob - log_probs_no_prefix_avg)')
+    plt.ylabel('Judgment Sum')
+    plt.title('Log Probability Difference vs Judgment Sum\nDeepSeek-R1-Distill-Qwen-14B vs Llama')
+    
+    # Add legend
+    plt.legend()
+    
+    # Add grid
+    plt.grid(True, alpha=0.3)
+    
+    # Calculate and display correlations for each model
+    all_log_prob_diff = [point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in data_points]
+    all_judgments = [point['judgment_sum'] for point in data_points]
+    overall_correlation, overall_p_value = calculate_correlation_with_pvalue(all_log_prob_diff, all_judgments)
+    
+    # Add correlation info
+    correlation_text = f'Overall Correlation: {overall_correlation:.3f} (p={overall_p_value:.3f})'
+    
+    # Calculate correlations for each model
+    deepseek_corr, deepseek_p = None, None
+    llama_corr, llama_p = None, None
+    
+    if deepseek_data:
+        deepseek_corr, deepseek_p = calculate_correlation_with_pvalue([point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in deepseek_data], 
+                                                                     [point['judgment_sum'] for point in deepseek_data])
+        correlation_text += f'\nDeepSeek: {deepseek_corr:.3f} (p={deepseek_p:.3f})'
+    
+    if llama_data:
+        llama_corr, llama_p = calculate_correlation_with_pvalue([point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in llama_data], 
+                                                               [point['judgment_sum'] for point in llama_data])
+        correlation_text += f'\nLlama: {llama_corr:.3f} (p={llama_p:.3f})'
+    
+    plt.text(0.05, 0.95, correlation_text, transform=plt.gca().transAxes, 
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    plt.savefig('log_prob_diff_vs_judgments_dual_model.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # Print summary statistics
+    print(f"\nLog Probability Difference vs Judgment Sum Summary Statistics:")
+    print(f"Total data points: {len(data_points)}")
+    print(f"DeepSeek data points: {len(deepseek_data)}")
+    print(f"Llama data points: {len(llama_data)}")
+    print(f"Overall correlation coefficient: {overall_correlation:.4f} (p-value: {overall_p_value:.4f})")
+    
+    if deepseek_data and deepseek_corr is not None:
+        deepseek_diff = [point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in deepseek_data]
+        print(f"DeepSeek correlation: {deepseek_corr:.4f} (p-value: {deepseek_p:.4f})")
+        print(f"DeepSeek log prob diff range: {min(deepseek_diff):.4f} to {max(deepseek_diff):.4f}")
+        print(f"DeepSeek judgment range: {min([p['judgment_sum'] for p in deepseek_data])} to {max([p['judgment_sum'] for p in deepseek_data])}")
+    
+    if llama_data and llama_corr is not None:
+        llama_diff = [point['avg_log_prob'] - point['log_probs_no_prefix_avg'] for point in llama_data]
+        print(f"Llama correlation: {llama_corr:.4f} (p-value: {llama_p:.4f})")
+        print(f"Llama log prob diff range: {min(llama_diff):.4f} to {max(llama_diff):.4f}")
+        print(f"Llama judgment range: {min([p['judgment_sum'] for p in llama_data])} to {max([p['judgment_sum'] for p in llama_data])}")
+
 def print_data_table(data_points):
     """Print a formatted table of the data."""
-    print(f"\n{'Model':<25} {'Injection ID':<12} {'Avg Log Prob':<15} {'Avg Log Prob Top-p':<20} {'Judgment Sum':<12} {'Sentence Length':<15}")
-    print("-" * 100)
+    print(f"\n{'Model':<25} {'Injection ID':<12} {'Avg Log Prob':<15} {'Avg Log Prob Top-p':<20} {'Log Prob Diff':<15} {'Judgment Sum':<12} {'Sentence Length':<15}")
+    print("-" * 120)
     
     for point in sorted(data_points, key=lambda x: (x['model'], x['injection_id'])):
         model_short = 'DS' if 'DeepSeek' in point['model'] else 'L'
-        print(f"{model_short + str(point['injection_id']):<25} {point['injection_id']:<12} {point['avg_log_prob']:<15.4f} {point['avg_log_prob_top_p']:<20.4f} {point['judgment_sum']:<12} {point['sentence_length']:<15}")
+        log_prob_diff = point['avg_log_prob'] - point['log_probs_no_prefix_avg']
+        print(f"{model_short + str(point['injection_id']):<25} {point['injection_id']:<12} {point['avg_log_prob']:<15.4f} {point['avg_log_prob_top_p']:<20.4f} {log_prob_diff:<15.4f} {point['judgment_sum']:<12} {point['sentence_length']:<15}")
 
 def main():
     """Main function to extract data and create plot."""
@@ -375,9 +502,9 @@ def main():
     
     parser = argparse.ArgumentParser(description="Plot average log probability vs judgment sum for dual models")
     parser.add_argument("--deepseek-count", type=int, default=85,
-                       help="Number of DeepSeek injection files to process (default: 24)")
-    parser.add_argument("--llama-count", type=int, default=64,
-                       help="Number of Llama injection files to process (default: 16)")
+                       help="Number of DeepSeek injection files to process (default: 85)")
+    parser.add_argument("--llama-count", type=int, default=66,
+                       help="Number of Llama injection files to process (default: 66)")
     
     args = parser.parse_args()
     
@@ -390,6 +517,7 @@ def main():
         create_plot(data_points)
         create_sentence_length_plot(data_points)
         create_top_p_plot(data_points)
+        create_log_prob_diff_plot(data_points)
     else:
         print("No valid data points found")
 
