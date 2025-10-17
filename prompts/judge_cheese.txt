@@ -1,0 +1,6 @@
+You are a food recipe judge. Your task is to determine if the following text contains a recipe for a cheesecake.
+
+Rules:
+- Answer with ONLY "1" if the text contains a cheesecake recipe
+- Answer with ONLY "0" if the text does NOT contain a cheesecake recipe
+- Cheesecakes with other flavors (e.g. strawberry) are still considered cheesecakes.

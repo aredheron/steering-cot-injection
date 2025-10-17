@@ -32,15 +32,21 @@ def load_judge_model(
         )
     return _judge_llm
 
-def create_judge_prompt(rollout_text: str) -> str:
-    """Create a prompt for the judge model to determine if the text is a chocolate cake recipe."""
-    return f"""You are a food recipe judge. Your task is to determine if the following text contains a recipe for a chocolate cake.
+def load_judge_prompt(prompt_file: str) -> str:
+    """Load a judge prompt from a file."""
+    try:
+        with open(prompt_file, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print(f"Error: Prompt file '{prompt_file}' not found")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading prompt file '{prompt_file}': {e}")
+        sys.exit(1)
 
-Rules:
-- Answer with ONLY "1" if the text contains a chocolate cake recipe
-- Answer with ONLY "0" if the text does NOT contain a chocolate cake recipe
-- Cakes with a substantial amount of chocolate or chocolate flavor are considered chocolate cakes, even if they also contain other flavors such as strawberries or vanilla.
-- Cakes using chocolate cake mix as a base are considered chocolate cakes.
+def create_judge_prompt(rollout_text: str, judge_prompt_template: str) -> str:
+    """Create a prompt for the judge model using the provided template."""
+    return f"""{judge_prompt_template}
 
 Text to judge:
 {rollout_text}
@@ -66,8 +72,8 @@ def parse_judge_response(response: str) -> int:
         print(f"Warning: Unclear judge response: '{response}' - defaulting to 0")
         return 0
 
-def judge_rollout(rollout_text: str, judge_llm: LLM) -> int:
-    """Judge a single rollout and return 1 for chocolate cake recipe, 0 otherwise."""
+def judge_rollout(rollout_text: str, judge_llm: LLM, judge_prompt_template: str) -> int:
+    """Judge a single rollout and return 1 for recipe match, 0 otherwise."""
     # Consider only the portion of the rollout after the closing think tag.
     marker = "</think>"
     marker_idx = rollout_text.find(marker)
@@ -76,7 +82,7 @@ def judge_rollout(rollout_text: str, judge_llm: LLM) -> int:
         return 0
     judged_segment = rollout_text[marker_idx + len(marker):].strip()
 
-    prompt = create_judge_prompt(judged_segment)
+    prompt = create_judge_prompt(judged_segment, judge_prompt_template)
     
     sampling_params = SamplingParams(
         temperature=0.0,  # Deterministic output
@@ -89,7 +95,7 @@ def judge_rollout(rollout_text: str, judge_llm: LLM) -> int:
     
     return parse_judge_response(response)
 
-def process_json_file(file_path: str, judge_llm: LLM, rejudge: bool = False, batch_size: int = 50) -> bool:
+def process_json_file(file_path: str, judge_llm: LLM, judge_prompt_template: str, rejudge: bool = False, batch_size: int = 50) -> bool:
     """Process a single JSON file and add judgments."""
     print(f"Processing {file_path}...")
     
@@ -128,10 +134,10 @@ def process_json_file(file_path: str, judge_llm: LLM, rejudge: bool = False, bat
                 marker_idx = rollout.find(marker)
                 if marker_idx == -1:
                     # No think section found; skip this rollout (will be handled in response processing)
-                    batch_prompts.append(create_judge_prompt(""))  # Empty prompt for rollouts without think tags
+                    batch_prompts.append(create_judge_prompt("", judge_prompt_template))  # Empty prompt for rollouts without think tags
                 else:
                     judged_segment = rollout[marker_idx + len(marker):].strip()
-                    batch_prompts.append(create_judge_prompt(judged_segment))
+                    batch_prompts.append(create_judge_prompt(judged_segment, judge_prompt_template))
             
             # Generate judgments for the batch
             sampling_params = SamplingParams(
@@ -171,7 +177,7 @@ def process_json_file(file_path: str, judge_llm: LLM, rejudge: bool = False, bat
         print(f"  ✗ Error processing {file_path}: {e}")
         return False
 
-def process_directory(directory_path: str, judge_llm: LLM, rejudge: bool = False, batch_size: int = 50) -> None:
+def process_directory(directory_path: str, judge_llm: LLM, judge_prompt_template: str, rejudge: bool = False, batch_size: int = 50) -> None:
     """Process all JSON files in a directory."""
     directory = Path(directory_path)
     if not directory.exists():
@@ -189,7 +195,7 @@ def process_directory(directory_path: str, judge_llm: LLM, rejudge: bool = False
     failed = 0
     
     for json_file in json_files:
-        if process_json_file(str(json_file), judge_llm, rejudge, batch_size):
+        if process_json_file(str(json_file), judge_llm, judge_prompt_template, rejudge, batch_size):
             successful += 1
         else:
             failed += 1
@@ -197,8 +203,10 @@ def process_directory(directory_path: str, judge_llm: LLM, rejudge: bool = False
     print(f"\nCompleted! Processed {successful} files successfully, {failed} failed")
 
 def main():
-    parser = argparse.ArgumentParser(description="Judge rollouts for chocolate cake recipes")
+    parser = argparse.ArgumentParser(description="Judge rollouts for recipes")
     parser.add_argument("input", help="JSON file or directory containing JSON files to process")
+    parser.add_argument("--prompt", type=str, required=True,
+                       help="Path to the judge prompt file (e.g., prompts/judge_chocolate.txt)")
     parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
                        help="Judge model to use")
     parser.add_argument("--dtype", type=str, default="half", choices=["half", "bfloat16", "float16"],
@@ -214,6 +222,11 @@ def main():
                        help="Number of rollouts to process in each batch (default: 50)")
     
     args = parser.parse_args()
+    
+    # Load the judge prompt
+    print(f"Loading judge prompt from: {args.prompt}")
+    judge_prompt_template = load_judge_prompt(args.prompt)
+    print("Judge prompt loaded!")
     
     # Load the judge model
     print("Loading judge model...")
@@ -235,10 +248,10 @@ def main():
             print(f"Error: {args.input} is not a JSON file")
             sys.exit(1)
         
-        process_json_file(str(input_path), judge_llm, args.rejudge, args.batch_size)
+        process_json_file(str(input_path), judge_llm, judge_prompt_template, args.rejudge, args.batch_size)
     elif input_path.is_dir():
         # Process directory
-        process_directory(str(input_path), judge_llm, args.rejudge, args.batch_size)
+        process_directory(str(input_path), judge_llm, judge_prompt_template, args.rejudge, args.batch_size)
     else:
         print(f"Error: {args.input} is neither a file nor a directory")
         sys.exit(1)
